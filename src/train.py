@@ -1,3 +1,4 @@
+import pandas as pd
 import argparse, numpy as np, torch
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score, recall_score
@@ -39,11 +40,20 @@ def fit(Xtr, ytr, Xva, yva, n_classes, grid, epochs=100, bs=512, lr=1e-3, patien
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train"); ap.add_argument("--test"); ap.add_argument("--epochs", type=int, default=100)
+    ap.add_argument("--train"); ap.add_argument("--test")
+    ap.add_argument("--epochs", type=int, default=100)
+    ap.add_argument("--protocol", default="official", choices=["official", "pooled"])
     a = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    tr, te, cat = load_nsl(a.train, a.test)
-    tr, va = train_test_split(tr, test_size=0.1, stratify=tr["label"], random_state=0)   # val carved BEFORE fitting prep
+
+    tr0, te0, cat = load_nsl(a.train, a.test)
+    if a.protocol == "pooled":
+        full = pd.concat([tr0, te0]).drop_duplicates()
+        tr, te = train_test_split(full, test_size=0.2, stratify=full["label"], random_state=0)
+    else:
+        tr, te = tr0, te0
+    tr, va = train_test_split(tr, test_size=0.1, stratify=tr["label"], random_state=0)  # val carved BEFORE fitting prep
+
     pp = Prep(cat).fit(tr)
     (Xtr, ytr), (Xva, yva), (Xte, yte) = [tuple(map(torch.tensor, pp.transform(d))) for d in (tr, va, te)]
     m = fit(Xtr, ytr, Xva, yva, len(pp.le.classes_), pp.grid, a.epochs, dev=dev)
