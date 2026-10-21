@@ -50,3 +50,34 @@ class Prep:
         pad = self.grid ** 2 - X.shape[1]
         X = np.pad(X, ((0, 0), (0, pad)))                       # zero-fill the tail, as in the paper
         return X, self.le.transform(df[self.label]).astype(np.int64)
+
+
+def load_unsw(train_path, test_path):
+    tr = pd.read_csv(train_path); te = pd.read_csv(test_path)
+    out = []
+    for df in (tr, te):
+        df = df.drop(columns=[c for c in ["id", "label"] if c in df.columns])
+        df = df.rename(columns={"attack_cat": "label"})
+        df["label"] = df["label"].astype(str).str.strip()
+        out.append(df)
+    tr, te = out
+    return tr.drop_duplicates(), te, ["proto", "service", "state"]
+
+
+def load_dataset(name, train_path, test_path):
+    if name == "nsl": return load_nsl(train_path, test_path)
+    if name == "unsw": return load_unsw(train_path, test_path)
+    raise ValueError(name)
+
+
+def make_splits(name, train_path, test_path, protocol, seed):
+    """Returns train, val, test dataframes + cat cols. Val is carved out BEFORE any fitting."""
+    from sklearn.model_selection import train_test_split
+    tr0, te0, cat = load_dataset(name, train_path, test_path)
+    if protocol == "pooled":
+        full = pd.concat([tr0, te0]).drop_duplicates()
+        tr, te = train_test_split(full, test_size=0.2, stratify=full["label"], random_state=seed)
+    else:
+        tr, te = tr0, te0
+    tr, va = train_test_split(tr, test_size=0.1, stratify=tr["label"], random_state=seed)
+    return tr, va, te, cat
