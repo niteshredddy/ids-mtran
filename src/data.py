@@ -64,9 +64,16 @@ def load_unsw(train_path, test_path):
     return tr.drop_duplicates(), te, ["proto", "service", "state"]
 
 
+def load_cic(train_path, test_path):
+    """Expects the small parquet files made by prepare_cic.py (no categorical columns)."""
+    tr = pd.read_parquet(train_path); te = pd.read_parquet(test_path)
+    return tr.drop_duplicates(), te, []
+
+
 def load_dataset(name, train_path, test_path):
     if name == "nsl": return load_nsl(train_path, test_path)
     if name == "unsw": return load_unsw(train_path, test_path)
+    if name == "cic": return load_cic(train_path, test_path)
     raise ValueError(name)
 
 
@@ -74,6 +81,10 @@ def make_splits(name, train_path, test_path, protocol, seed):
     """Returns train, val, test dataframes + cat cols. Val is carved out BEFORE any fitting."""
     from sklearn.model_selection import train_test_split
     tr0, te0, cat = load_dataset(name, train_path, test_path)
+    keep = te0["label"].isin(set(tr0["label"]))               # classes never seen in training can't be scored
+    if not keep.all():
+        print(f"dropping {int((~keep).sum())} test rows with labels unseen in train: {sorted(set(te0['label'][~keep]))}")
+        te0 = te0[keep]
     if protocol == "pooled":
         full = pd.concat([tr0, te0]).drop_duplicates()
         tr, te = train_test_split(full, test_size=0.2, stratify=full["label"], random_state=seed)

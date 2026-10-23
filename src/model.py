@@ -50,10 +50,10 @@ class Backbone(nn.Module):
 
 class CFE(nn.Module):
     """Cross Feature Enrichment: resize every scale into every branch, concat, 1x1 conv, down-sample, fuse, 3 linear layers."""
-    def __init__(self, d, n_classes, drop):
+    def __init__(self, d, n_classes, drop, n=3):
         super().__init__()
-        self.mix = nn.ModuleList([nn.Conv2d(3 * d, d, 1) for _ in range(3)])
-        self.head = nn.Sequential(nn.Linear(3 * d, 2 * d), nn.GELU(), nn.Dropout(drop),
+        self.mix = nn.ModuleList([nn.Conv2d(n * d, d, 1) for _ in range(n)])
+        self.head = nn.Sequential(nn.Linear(n * d, 2 * d), nn.GELU(), nn.Dropout(drop),
                                   nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, n_classes))
 
     def forward(self, feats):
@@ -68,26 +68,36 @@ class CFE(nn.Module):
 
 
 class IDSMTran(nn.Module):
+    """branches: subset of (0,1,2) = P1,P2,P3. use_cfe=False -> pooled concat + 3 linear layers (paper's ablation)."""
     def __init__(self, grid=12, n_classes=5, ch=16, d=64, heads=4, layers=2,
-                 patches=(2, 3, 4), drop=0.1):          # (ASSUMPTION) patch sizes give 6x6, 4x4, 3x3 token grids on a 12x12 grid
+                 patches=(2, 3, 4), drop=0.1, branches=(0, 1, 2), use_cfe=True):
         super().__init__()
-        self.grid = grid
-        self.b1 = nn.Sequential(cbg(1, ch, 0))                              # P1 fine: 1x1
-        self.b2 = nn.Sequential(cbg(1, ch, 0), cbg(ch, ch, 2))               # P2 mid: 1x1 + dilated 3x3
-        self.b3 = nn.Sequential(cbg(1, ch, 0), cbg(ch, ch, 2), cbg(ch, ch, 2))  # P3 coarse: 1x1 + 2x dilated 3x3
-        self.pwp = nn.ModuleList([PwP(ch, d, s) for s in patches])
-        self.bb = nn.ModuleList([Backbone(d, heads, layers, drop) for _ in patches])
-        self.cfe = CFE(d, n_classes, drop)
+        self.grid, self.branches = grid, tuple(branches)
+        self.full = self.branches == (0, 1, 2)               # top-down P1->P2->P3 fusion only in the full model
+        self.use_cfe = use_cfe and len(self.branches) > 1
+        mk = {0: lambda: cbg(1, ch, 0),
+              1: lambda: nn.Sequential(cbg(1, ch, 0), cbg(ch, ch, 2)),
+              2: lambda: nn.Sequential(cbg(1, ch, 0), cbg(ch, ch, 2), cbg(ch, ch, 2))}
+        k = [str(i) for i in self.branches]
+        self.convs = nn.ModuleDict({i: mk[int(i)]() for i in k})
+        self.pwp = nn.ModuleDict({i: PwP(ch, d, patches[int(i)]) for i in k})
+        self.bb = nn.ModuleDict({i: Backbone(d, heads, layers, drop) for i in k})
+        n = len(k)
+        if self.use_cfe:
+            self.cfe = CFE(d, n_classes, drop, n)
+        else:
+            self.head = nn.Sequential(nn.Linear(n * d, 2 * d), nn.GELU(), nn.Dropout(drop),
+                                      nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, n_classes))
 
     def forward(self, x):                                   # x: B, grid*grid (padded features)
         x = x.view(-1, 1, self.grid, self.grid)
-        f1, f2, f3 = self.b1(x), self.b2(x), self.b3(x)
-        # top-down fusion: low-level (auxiliary) supplements high-level (primary)
-        f2 = f2 + f1
-        f3 = f3 + f2
-        toks = [p(f) for p, f in zip(self.pwp, (f1, f2, f3))]
-        feats = [b(t) for b, t in zip(self.bb, toks)]
-        return self.cfe(feats)
+        f = {i: self.convs[str(i)](x) for i in self.branches}
+        if self.full:                                       # low-level (auxiliary) supplements high-level (primary)
+            f[1] = f[1] + f[0]; f[2] = f[2] + f[1]
+        feats = [self.bb[str(i)](self.pwp[str(i)](f[i])) for i in self.branches]
+        if self.use_cfe:
+            return self.cfe(feats)
+        return self.head(torch.cat([F.adaptive_avg_pool2d(t, 1).flatten(1) for t in feats], 1))
 
 
 class FocalLoss(nn.Module):
